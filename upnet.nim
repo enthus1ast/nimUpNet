@@ -1,12 +1,9 @@
 import net
 import asyncnet, asyncdispatch
-# import sequtils
 import parseopt2
 import parseutils
 
 const SIZE = 1024
-# const SIZE = 1
-# const SIZE = 10
 
 type 
   UpstreamProxy = object of RootObj 
@@ -15,7 +12,7 @@ type
     gatewayPort*: Port
     listenPort*: Port #= Port(7777)
     running*: bool # = true
-    xorKey*: string # every bit gets XORed with every char in this string
+    xorKey*: string # every bit gets XORed with every char in this string (and its position)
 
 
 proc xorPayload(upProxy: UpstreamProxy, buffer: string): string = 
@@ -27,7 +24,9 @@ proc xorPayload(upProxy: UpstreamProxy, buffer: string): string =
   for bufferChar in buffer:
     cbuf = bufferChar
     for i, keyChar in upProxy.xorKey:
-      cbuf = chr( (keyChar.int + i) xor cbuf.int)
+      # we use the position of the char in the key
+      # to harden this a bit....
+      cbuf = chr( ((keyChar.int + i) mod 255) xor cbuf.int)
     result.add(cbuf)
 
 
@@ -48,6 +47,11 @@ proc isMaster(upProxy: UpstreamProxy): bool =
 
 
 proc pump(upProxy: UpstreamProxy, src, dst: AsyncSocket) {.async.} = 
+  ## transfers data back and forth.
+  ## since asyncnet recv cannot timeout, we have too 
+  ## peek the data first and check how much data we have.
+  ## Then it reads that amounth of data from buf
+  ## TODO when we found a better solution change this...
   while true:
     var buffer: string
     try:
@@ -68,12 +72,10 @@ proc pump(upProxy: UpstreamProxy, src, dst: AsyncSocket) {.async.} =
 
     if buffer == "":
       src.close()
-      dst.close()
-      # echo "src.isClosed() ", src.isClosed()
-      # echo "dst.isClosed() ", dst.isClosed()      
+      dst.close()    
       break
     else:
-      await dst.send( upProxy.xorPayload(buffer) )
+      await dst.send(upProxy.xorPayload(buffer))
 
 
 proc handleProxyClients(upProxy: UpstreamProxy, client: AsyncSocket) {.async.} = 
@@ -84,8 +86,6 @@ proc handleProxyClients(upProxy: UpstreamProxy, client: AsyncSocket) {.async.} =
     echo "Could not connect to gateway ", upProxy.gateway, ":", upProxy.gatewayPort 
     client.close()
     return
-
-
   asyncCheck upProxy.pump(client, upstreamSocket)
   asyncCheck upProxy.pump(upstreamSocket,client )
 
@@ -99,7 +99,6 @@ proc serveUpstreamProxy(upProxy: UpstreamProxy) {.async.} =
   while true:
     let client = await server.accept()
     echo "Client connected"
-
     asyncCheck upProxy.handleProxyClients(client)
 
 
@@ -122,6 +121,7 @@ proc writeHelp() =
   echo " upnet -l:1337 -g:service.myhost.loc -gp:8080"
 
 
+# create proxy object with default configuration
 var upProxy = newUpstreamProxy("127.0.0.1",Port(8888),Port(8877)) 
 
 # Parse command line options.
@@ -144,11 +144,8 @@ for kind, key, val in getopt():
           upProxy.listenPort = Port( portnum )   
         of "x":
           upProxy.xorKey = val
-    else:
+    else: 
       discard
-
-# upProxy.xorKey = "hallo"
-# echo upProxy.xorPayload("i am the payload")
 
 echo upProxy # echo configuration
 asyncCheck upProxy.serveUpstreamProxy()
