@@ -3,7 +3,7 @@ import asyncnet, asyncdispatch
 import parseopt2
 import parseutils
 
-const SIZE = 1024
+const SIZE = 1024 
 
 type 
   UpstreamProxy = object of RootObj 
@@ -48,7 +48,7 @@ proc isMaster(upProxy: UpstreamProxy): bool =
 
 proc pump(upProxy: UpstreamProxy, src, dst: AsyncSocket) {.async.} = 
   ## transfers data back and forth.
-  ## since asyncnet recv cannot timeout, we have too 
+  ## since asyncnet recv cannot timeout, we have to 
   ## peek the data first and check how much data we have.
   ## Then it reads that amounth of data from buf
   ## TODO when we found a better solution change this...
