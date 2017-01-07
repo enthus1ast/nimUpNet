@@ -2,17 +2,22 @@ import net
 import asyncnet, asyncdispatch
 import parseopt2
 import parseutils
+import strutils
 
 const SIZE = 1024 
 
 type 
+
+  Host = tuple[host: string,port: Port]
+  Hosts = seq[Host]
+
   UpstreamProxy = object of RootObj 
     master : bool
-    gateway* : string
-    gatewayPort*: Port
+    gateways* : Hosts
     listenPort*: Port #= Port(7777)
     running*: bool # = true
     xorKey*: string # every bit gets XORed with every char in this string (and its position)
+
 
 
 proc xorPayload(upProxy: UpstreamProxy, buffer: string): string = 
@@ -30,16 +35,15 @@ proc xorPayload(upProxy: UpstreamProxy, buffer: string): string =
     result.add(cbuf)
 
 
-proc newUpstreamProxy(gatewayStr: string, gatewayPort: Port, listenPort: Port): UpstreamProxy =
+proc newUpstreamProxy(gateways: Hosts, listenPort: Port): UpstreamProxy =
   result = UpstreamProxy()
   result.listenPort = listenPort
-
-  if gatewayStr != "":
-    result.gateway = gatewayStr
-    result.gatewayPort = gatewayPort
-    result.master = false # couse we've got a gateway, we are not the master
-  else:
-    result.master = true # we've got not gateway, we are the endpoint, the master
+  result.gateways = gateways
+  # if gateways.len != 0:
+  #   result.gateways = gateways
+  #   result.master = false # couse we've got a gateway, we are not the master
+  # else:
+  #   result.master = true # we've got not gateway, we are the endpoint, the master
 
 
 proc isMaster(upProxy: UpstreamProxy): bool = 
@@ -79,15 +83,25 @@ proc pump(upProxy: UpstreamProxy, src, dst: AsyncSocket) {.async.} =
 
 
 proc handleProxyClients(upProxy: UpstreamProxy, client: AsyncSocket) {.async.} = 
-  var upstreamSocket = newAsyncSocket(buffered=true)
-  try:
-    await upstreamSocket.connect(upProxy.gateway, upProxy.gatewayPort)
-  except:
-    echo "Could not connect to gateway ", upProxy.gateway, ":", upProxy.gatewayPort 
+  var upstreamSocket: AsyncSocket
+  var connected: bool = false
+  for actualGateway in upProxy.gateways:
+    # echo actualGateway
+    try:
+      upstreamSocket = newAsyncSocket(buffered=true)
+      await upstreamSocket.connect(actualGateway.host, actualGateway.port)
+      connected = true
+    except:
+      # echo getCurrentExceptionMsg()
+      echo "Could not connect to gateway ", actualGateway.host, ":", actualGateway.port 
+
+  if connected == true:
+    asyncCheck upProxy.pump(client, upstreamSocket)
+    asyncCheck upProxy.pump(upstreamSocket,client )
+  else:
+    echo "No gateway let us connect...."
     client.close()
     return
-  asyncCheck upProxy.pump(client, upstreamSocket)
-  asyncCheck upProxy.pump(upstreamSocket,client )
 
 
 proc serveUpstreamProxy(upProxy: UpstreamProxy) {.async.} = 
@@ -110,8 +124,7 @@ proc writeHelp() =
   echo " to the gateway:gatewayPort"
   echo ""
   echo "Usage:"
-  echo " -g:host    gateway hostname/ip"
-  echo " -gp:port   gateway port"
+  echo " -g:host:port    gateway hostname, allowed multiple times!"
   echo " -l:port    listening port"
   echo " -x:key     XORs the payload with key"
   echo "            (only entry and exit node needs key)"
@@ -119,11 +132,20 @@ proc writeHelp() =
   echo "Example:"
   echo " # listens on port 1337 and tunnel TCP"
   echo " # back and forth service.myhost.loc:8080"
-  echo " upnet -l:1337 -g:service.myhost.loc -gp:8080"
+  echo " upnet -l:1337 -g:service.myhost.loc:8080"
+  echo " upnet -l:1337 -g:service.myhost.loc:8080 -g:192.168.2.155:8080"
+
+
+proc toHostPort(s: string): Host = 
+  var parts = s.split(":")
+  if parts.len == 2:    
+    result.host = parts[0]
+    result.port = Port(parseInt(parts[1]))
 
 
 # create proxy object with default configuration
-var upProxy = newUpstreamProxy("127.0.0.1",Port(8888),Port(8877)) 
+# var upProxy = newUpstreamProxy( @[("127.0.0.1",Port(8888))] ,Port(8877)) 
+var upProxy = newUpstreamProxy( @[] ,Port(8877)) 
 
 # Parse command line options.
 for kind, key, val in getopt():
@@ -134,11 +156,11 @@ for kind, key, val in getopt():
           writeHelp()
           quit()
         of "g":
-          upProxy.gateway = val
-        of "gp":
-          var portnum = 0
-          discard parseInt(val, portnum)
-          upProxy.gatewayPort = Port( portnum )
+          upProxy.gateways.add(val.toHostPort())
+        # of "gp":
+        #   var portnum = 0
+        #   discard parseInt(val, portnum)
+        #   upProxy.gatewayPort = Port( portnum )
         of "l":
           var portnum = 0
           discard parseInt(val, portnum)
