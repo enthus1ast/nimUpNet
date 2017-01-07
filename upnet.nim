@@ -55,7 +55,7 @@ proc pump(upProxy: UpstreamProxy, src, dst: AsyncSocket) {.async.} =
   while true:
     var buffer: string
     try:
-      buffer = await src.recv(SIZE, timeout=2,flags={SocketFlag.Peek, SocketFlag.SafeDisconn})
+      buffer = await src.recv(SIZE, flags={SocketFlag.Peek, SocketFlag.SafeDisconn})
     except:
       buffer = ""
 
@@ -92,6 +92,7 @@ proc handleProxyClients(upProxy: UpstreamProxy, client: AsyncSocket) {.async.} =
 
 proc serveUpstreamProxy(upProxy: UpstreamProxy) {.async.} = 
   var server = newAsyncSocket()
+  server.setSockOpt(OptReuseAddr, true)
   server.bindAddr(upProxy.listenPort)
   server.listen()
   echo "Bound to upProxy.listenPort: ", upProxy.listenPort
@@ -109,7 +110,7 @@ proc writeHelp() =
   echo " to the gateway:gatewayPort"
   echo ""
   echo "Usage:"
-  echo " -g:host    gateway hostname"
+  echo " -g:host    gateway hostname/ip"
   echo " -gp:port   gateway port"
   echo " -l:port    listening port"
   echo " -x:key     XORs the payload with key"
