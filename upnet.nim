@@ -18,8 +18,6 @@ type
     running*: bool # = true
     xorKey*: string # every bit gets XORed with every char in this string (and its position)
 
-
-
 proc xorPayload(upProxy: UpstreamProxy, buffer: string): string = 
   ## xors the buffer with the xorKey given in the upstreamProxy object
   if upProxy.xorKey == "":
@@ -39,12 +37,6 @@ proc newUpstreamProxy(gateways: Hosts, listenPort: Port): UpstreamProxy =
   result = UpstreamProxy()
   result.listenPort = listenPort
   result.gateways = gateways
-  # if gateways.len != 0:
-  #   result.gateways = gateways
-  #   result.master = false # couse we've got a gateway, we are not the master
-  # else:
-  #   result.master = true # we've got not gateway, we are the endpoint, the master
-
 
 proc isMaster(upProxy: UpstreamProxy): bool = 
   return upProxy.master
@@ -75,6 +67,7 @@ proc pump(upProxy: UpstreamProxy, src, dst: AsyncSocket) {.async.} =
         buffer = ""        
 
     if buffer == "":
+      echo "client _OR_ gateways diconnects TODO"
       src.close()
       dst.close()    
       break
@@ -91,9 +84,11 @@ proc handleProxyClients(upProxy: UpstreamProxy, client: AsyncSocket) {.async.} =
       upstreamSocket = newAsyncSocket(buffered=true)
       await upstreamSocket.connect(actualGateway.host, actualGateway.port)
       connected = true
+      echo "[X] -> ", actualGateway.host, ":", actualGateway.port 
+      break
     except:
       # echo getCurrentExceptionMsg()
-      echo "Could not connect to gateway ", actualGateway.host, ":", actualGateway.port 
+      echo "[ ] -> ", actualGateway.host, ":", actualGateway.port 
 
   if connected == true:
     asyncCheck upProxy.pump(client, upstreamSocket)
@@ -124,15 +119,17 @@ proc writeHelp() =
   echo " to the gateway:gatewayPort"
   echo ""
   echo "Usage:"
-  echo " -g:host:port    gateway hostname, allowed multiple times!"
-  echo " -l:port    listening port"
-  echo " -x:key     XORs the payload with key"
-  echo "            (only entry and exit node needs key)"
+  echo " -g:host:port   gateway hostname, allowed multiple times!"
+  echo " -l:port        listening port"
+  echo " -x:key         XORs the payload with key"
+  echo "                (only entry and exit node needs key)"
   echo ""
   echo "Example:"
   echo " # listens on port 1337 and tunnel TCP"
   echo " # back and forth service.myhost.loc:8080"
   echo " upnet -l:1337 -g:service.myhost.loc:8080"
+  echo ""
+  echo " # first service.myhost.loc then 192.168.2.155"
   echo " upnet -l:1337 -g:service.myhost.loc:8080 -g:192.168.2.155:8080"
 
 
@@ -157,10 +154,6 @@ for kind, key, val in getopt():
           quit()
         of "g":
           upProxy.gateways.add(val.toHostPort())
-        # of "gp":
-        #   var portnum = 0
-        #   discard parseInt(val, portnum)
-        #   upProxy.gatewayPort = Port( portnum )
         of "l":
           var portnum = 0
           discard parseInt(val, portnum)
@@ -170,6 +163,11 @@ for kind, key, val in getopt():
     else: 
       discard
 
-echo upProxy # echo configuration
+if upProxy.gateways.len == 0:
+  echo "no gateways specified. Add a few with: '-g:host:port'"
+  writeHelp()
+  quit()
+
+echo upProxy
 asyncCheck upProxy.serveUpstreamProxy()
 runForever()
