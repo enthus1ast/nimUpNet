@@ -1,13 +1,30 @@
+#
+#
+#                    upnet 
+#             (c) Copyright 2017
+#                 David Krause
+#
+#    See the file "copying.txt", included in this
+#    distribution, for details about the copyright.
+#
+## This is an async general purpose tcp proxy / port forwarder
+## This listens on a local port and transports 
+## data back and forth multiple gateways.
+## If one gateway is not online, we use the next.
+## Tested on linux and windows.
+
 import net
 import asyncnet, asyncdispatch
 import parseopt2
 import parseutils
 import strutils
 
-const SIZE = 1024 
+const SIZE = 1024 ## max size the buffer could be
+                  ## but since we peek on the sockets,
+                  ## this buffer gets not filled completely
+                  ## anyway...
 
 type 
-
   Host = tuple[host: string,port: Port]
   Hosts = seq[Host]
 
@@ -19,9 +36,11 @@ type
     xorKey*: string # every bit gets XORed with every char in this string (and its position)
 
 
-
 proc xorPayload(upProxy: UpstreamProxy, buffer: string): string = 
   ## xors the buffer with the xorKey given in the upstreamProxy object
+  ## only the entry and the exit needs to have the same key. 
+  ## since this is essentially XOR this utilize the same key for "encryption" or "decryption"
+  ## This is NOT a real crypto!
   if upProxy.xorKey == "":
     return buffer
   result = ""
@@ -39,11 +58,6 @@ proc newUpstreamProxy(gateways: Hosts, listenPort: Port): UpstreamProxy =
   result = UpstreamProxy()
   result.listenPort = listenPort
   result.gateways = gateways
-  # if gateways.len != 0:
-  #   result.gateways = gateways
-  #   result.master = false # couse we've got a gateway, we are not the master
-  # else:
-  #   result.master = true # we've got not gateway, we are the endpoint, the master
 
 
 proc isMaster(upProxy: UpstreamProxy): bool = 
@@ -59,22 +73,24 @@ proc pump(upProxy: UpstreamProxy, src, dst: AsyncSocket) {.async.} =
   while true:
     var buffer: string
     try:
+      ## Peek, so input buffer remains the same!
       buffer = await src.recv(SIZE, timeout=2,flags={SocketFlag.Peek, SocketFlag.SafeDisconn})
     except:
       buffer = ""
 
     if buffer.len > 0:
       try:
-        discard await src.recv(buffer.len)
+        discard await src.recv(buffer.len) # TODO (better way?) we empty the buffer by reading it 
       except:
         buffer = ""
     else:
       try:
-        buffer = await src.recv(1)
+        buffer = await src.recv(1) # we wait for new data...
       except:
         buffer = ""        
 
     if buffer == "":
+      # if one side closes we close both sides!
       src.close()
       dst.close()    
       break
@@ -86,7 +102,6 @@ proc handleProxyClients(upProxy: UpstreamProxy, client: AsyncSocket) {.async.} =
   var upstreamSocket: AsyncSocket
   var connected: bool = false
   for actualGateway in upProxy.gateways:
-    # echo actualGateway
     try:
       upstreamSocket = newAsyncSocket(buffered=true)
       await upstreamSocket.connect(actualGateway.host, actualGateway.port)
@@ -120,7 +135,7 @@ proc writeHelp() =
   echo "upnet - upstream network"
   echo " tunnels all TCP connections"
   echo " established to the listen port"
-  echo " to the gateway:gatewayPort"
+  echo " to every gateway specified"
   echo ""
   echo "Usage:"
   echo " -g:host    gateway hostname, allowed multiple times!"
@@ -143,7 +158,6 @@ proc toHostPort(s: string): Host =
 
 
 # create proxy object with default configuration
-# var upProxy = newUpstreamProxy( @[("127.0.0.1",Port(8888))] ,Port(8877)) 
 var upProxy = newUpstreamProxy( @[] ,Port(8877)) 
 
 # Parse command line options.
@@ -156,10 +170,6 @@ for kind, key, val in getopt():
           quit()
         of "g":
           upProxy.gateways.add(val.toHostPort())
-        # of "gp":
-        #   var portnum = 0
-        #   discard parseInt(val, portnum)
-        #   upProxy.gatewayPort = Port( portnum )
         of "l":
           var portnum = 0
           discard parseInt(val, portnum)
@@ -169,6 +179,6 @@ for kind, key, val in getopt():
     else: 
       discard
 
-echo upProxy # echo configuration
+echo upProxy
 asyncCheck upProxy.serveUpstreamProxy()
 runForever()
