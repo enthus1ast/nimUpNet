@@ -28,12 +28,14 @@ type
   Host = tuple[host: string,port: Port]
   Hosts = seq[Host]
 
-  UpstreamProxy = object of RootObj 
+  # UpstreamProxy = ref object of RootObj 
+  UpstreamProxy = object of RootObj
     master : bool
     gateways* : Hosts
     listenPort*: Port #= Port(7777)
     running*: bool # = true
     xorKey*: string # every bit gets XORed with every char in this string (and its position)
+    lastWorking*: Host # we save the last working host to fasten internet browsers.
 
 
 proc xorPayload(upProxy: UpstreamProxy, buffer: string): string = 
@@ -58,6 +60,7 @@ proc newUpstreamProxy(gateways: Hosts, listenPort: Port): UpstreamProxy =
   result = UpstreamProxy()
   result.listenPort = listenPort
   result.gateways = gateways
+
 
 
 proc isMaster(upProxy: UpstreamProxy): bool = 
@@ -101,7 +104,8 @@ proc pump(upProxy: UpstreamProxy, src, dst: AsyncSocket) {.async.} =
 proc handleProxyClients(upProxy: UpstreamProxy, client: AsyncSocket) {.async.} = 
   var upstreamSocket: AsyncSocket
   var connected: bool = false
-  for actualGateway in upProxy.gateways:
+  for actualGateway in @[upProxy.lastWorking] & upProxy.gateways:
+  # for actualGateway in upProxy.gateways:    
     try:
       upstreamSocket = newAsyncSocket(buffered=true)
       await upstreamSocket.connect(actualGateway.host, actualGateway.port)
@@ -109,6 +113,7 @@ proc handleProxyClients(upProxy: UpstreamProxy, client: AsyncSocket) {.async.} =
     except:
       # echo getCurrentExceptionMsg()
       echo "Could not connect to gateway ", actualGateway.host, ":", actualGateway.port 
+    upProxy.lastWorking = actualGateway
 
   if connected == true:
     asyncCheck upProxy.pump(client, upstreamSocket)
@@ -179,6 +184,7 @@ for kind, key, val in getopt():
     else: 
       discard
 
-echo upProxy
+# echo upProxy
+# echo @[upProxy.lastWorking] & upProxy.gateways
 asyncCheck upProxy.serveUpstreamProxy()
 runForever()
