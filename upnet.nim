@@ -13,6 +13,12 @@
 ## If one gateway is not online, we use the next.
 ## Tested on linux and windows.
 
+## BUGs:
+##  - ipv6 not working!
+##  - store last working proxy
+##
+
+
 import net
 import asyncnet, asyncdispatch
 import parseopt2
@@ -38,6 +44,9 @@ type
     lastWorking*: Host # we save the last working host to fasten internet browsers.
 
 
+var lastWorking: Host ## TODO this should be the last working of the upnet object!!!
+
+
 proc xorPayload(upProxy: UpstreamProxy, buffer: string): string = 
   ## xors the buffer with the xorKey given in the upstreamProxy object
   ## only the entry and the exit needs to have the same key. 
@@ -61,11 +70,8 @@ proc newUpstreamProxy(gateways: Hosts, listenPort: Port): UpstreamProxy =
   result.listenPort = listenPort
   result.gateways = gateways
 
-
-
 proc isMaster(upProxy: UpstreamProxy): bool = 
   return upProxy.master
-
 
 proc pump(upProxy: UpstreamProxy, src, dst: AsyncSocket) {.async.} = 
   ## transfers data back and forth.
@@ -104,16 +110,26 @@ proc pump(upProxy: UpstreamProxy, src, dst: AsyncSocket) {.async.} =
 proc handleProxyClients(upProxy: UpstreamProxy, client: AsyncSocket) {.async.} = 
   var upstreamSocket: AsyncSocket
   var connected: bool = false
-  for actualGateway in @[upProxy.lastWorking] & upProxy.gateways:
-  # for actualGateway in upProxy.gateways:    
+  # for actualGateway in @[upProxy.lastWorking] & upProxy.gateways:
+  # for actualGateway in upProxy.gateways:  
+  for actualGateway in @[lastWorking] & upProxy.gateways: # TODO
+    echo "trying ", actualGateway
+    if actualGateway.host.isNil or actualGateway.port.int == 0:
+      echo "Gateway is invalid: ", actualGateway
+      continue # we skip invalid gateway entries
+
     try:
       upstreamSocket = newAsyncSocket(buffered=true)
       await upstreamSocket.connect(actualGateway.host, actualGateway.port)
       connected = true
+      echo "Set lastWorking to: ", actualGateway 
+      lastWorking = actualGateway # TODO
+      break
     except:
       # echo getCurrentExceptionMsg()
       echo "Could not connect to gateway ", actualGateway.host, ":", actualGateway.port 
-    upProxy.lastWorking = actualGateway
+    # upProxy.lastWorking = actualGateway
+
 
   if connected == true:
     asyncCheck upProxy.pump(client, upstreamSocket)
@@ -123,12 +139,14 @@ proc handleProxyClients(upProxy: UpstreamProxy, client: AsyncSocket) {.async.} =
     client.close()
     return
 
-
 proc serveUpstreamProxy(upProxy: UpstreamProxy) {.async.} = 
   var server = newAsyncSocket()
   server.bindAddr(upProxy.listenPort)
   server.listen()
   echo "Bound to upProxy.listenPort: ", upProxy.listenPort
+  echo "Will forward to:"
+  for gw in upProxy.gateways:
+    echo "\t", gw
 
   while true:
     let client = await server.accept()
@@ -161,7 +179,6 @@ proc toHostPort(s: string): Host =
     result.host = parts[0]
     result.port = Port(parseInt(parts[1]))
 
-
 # create proxy object with default configuration
 var upProxy = newUpstreamProxy( @[] ,Port(8877)) 
 
@@ -183,6 +200,10 @@ for kind, key, val in getopt():
           upProxy.xorKey = val
     else: 
       discard
+
+if upProxy.gateways.len == 0:
+  writeHelp()
+  quit()
 
 # echo upProxy
 # echo @[upProxy.lastWorking] & upProxy.gateways
