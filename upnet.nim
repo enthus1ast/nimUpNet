@@ -107,32 +107,103 @@ proc pump(upProxy: UpstreamProxy, src, dst: AsyncSocket) {.async.} =
     else:
       await dst.send(upProxy.xorPayload(buffer))
 
+proc connectToFastest(gateways: Hosts, timeout = 3_000): Future[AsyncSocket] {.async.} = 
+  var futures = newSeq[ Future[AsyncSocket] ]()
+  for actualGateway in gateways:
+    echo "requesting: ", actualGateway
+    if actualGateway.host.isNil or actualGateway.port.int == 0:
+      echo "Gateway is invalid (SKIPPING): ", actualGateway
+      continue # we skip invalid gateway entries
+
+    try:
+      var fut = asyncnet.dial(actualGateway.host, actualGateway.port, IPPROTO_TCP)
+      # asyncCheck fut 
+      futures.add fut
+    except:
+      echo "dial fails"
+      continue
+
+  if futures.len == 0: 
+    echo "no futures left"
+    return
+
+  var timeoutFut = sleepAsync(timeout)
+  while true:
+    for fut in futures:
+      echo fut.finished
+      if fut.finished == true:
+        return await fut
+      if timeoutFut.finished == true:
+        echo "timeouted"
+        return 
+    await sleepAsync(150)
+      # quit()
+    # try:
+    #   # var upstreamSocket = newAsyncSocket(buffered=true)
+    #   # var fut = upstreamSocket.connect(actualGateway.host, actualGateway.port)
+    #   # futures.add fut
+
+    # #   if not inTIme :
+    # #     echo "Gateway timeouted:", actualGateway
+    # #     continue
+    # #   connected = true
+    # #   echo "Set lastWorking to: ", actualGateway 
+    # #   lastWorking = actualGateway # TODO
+    # #   break
+    # except:
+    #   echo getCurrentExceptionMsg()
+    # #   echo "Could not connect to gateway ", actualGateway.host, ":", actualGateway.port 
+    # # # upProxy.lastWorking = actualGateway    
+
 
 proc handleProxyClients(upProxy: UpstreamProxy, client: AsyncSocket) {.async.} = 
   var upstreamSocket: AsyncSocket
   var connected: bool = false
   # for actualGateway in @[upProxy.lastWorking] & upProxy.gateways:
   # for actualGateway in upProxy.gateways:  
-  for actualGateway in @[lastWorking] & upProxy.gateways: # TODO
-    echo "trying ", actualGateway
-    if actualGateway.host.isNil or actualGateway.port.int == 0:
-      echo "Gateway is invalid: ", actualGateway
-      continue # we skip invalid gateway entries
+  
 
-    try:
-      upstreamSocket = newAsyncSocket(buffered=true)
-      let inTime = await withTimeout(upstreamSocket.connect(actualGateway.host, actualGateway.port), 1000)
-      if not inTIme :
-        echo "Gateway timeouted:", actualGateway
-        continue
-      connected = true
-      echo "Set lastWorking to: ", actualGateway 
-      lastWorking = actualGateway # TODO
-      break
-    except:
-      # echo getCurrentExceptionMsg()
-      echo "Could not connect to gateway ", actualGateway.host, ":", actualGateway.port 
-    # upProxy.lastWorking = actualGateway
+  try:
+    upstreamSocket = await connectToFastest(@[lastWorking] & upProxy.gateways)
+    connected = true
+  except:
+    connected = false
+      
+  # lastWorking = upstreamSocket
+  # let inTime = await withTimeout( connectToFastest(@[lastWorking] & upProxy.gateways) , 3000)
+
+  #     connected = true
+  #     echo "Set lastWorking to: ", actualGateway 
+  #     lastWorking = actualGateway # TODO
+  #     break
+  #   except:
+  #     # echo getCurrentExceptionMsg()
+  #     echo "Could not connect to gateway ", actualGateway.host, ":", actualGateway.port 
+  #   # upProxy.lastWorking = actualGateway
+
+
+
+  
+  # for actualGateway in @[lastWorking] & upProxy.gateways: # TODO
+  #   echo "trying ", actualGateway
+  #   if actualGateway.host.isNil or actualGateway.port.int == 0:
+  #     echo "Gateway is invalid: ", actualGateway
+  #     continue # we skip invalid gateway entries
+
+  #   try:
+  #     upstreamSocket = newAsyncSocket(buffered=true)
+  #     let inTime = await withTimeout(upstreamSocket.connect(actualGateway.host, actualGateway.port), 1000)
+  #     if not inTIme :
+  #       echo "Gateway timeouted:", actualGateway
+  #       continue
+  #     connected = true
+  #     echo "Set lastWorking to: ", actualGateway 
+  #     lastWorking = actualGateway # TODO
+  #     break
+  #   except:
+  #     # echo getCurrentExceptionMsg()
+  #     echo "Could not connect to gateway ", actualGateway.host, ":", actualGateway.port 
+  #   # upProxy.lastWorking = actualGateway
 
 
   if connected == true:
@@ -168,12 +239,12 @@ proc toHostPort(s: string): Host =
 
 
 when isMainModule:
-  # proc foo(upProxy: UpstreamProxy): Future[void] {.async.} =
-  #   for idx in 1..100:
-  #     var host = toHostPort("jugene.code0.xyz:" & $(200+idx) )
-  #     echo host
-  #     upProxy.gateways.add( host )
-  #     # await sleepAsync 100
+  proc foo(upProxy: UpstreamProxy): Future[void] {.async.} =
+    for idx in 1..20:
+      var host = toHostPort("jugene.code0.xyz:" & $(210+idx) )
+      echo host
+      upProxy.gateways.add( host )
+      # await sleepAsync 100
 
   proc writeHelp() = 
     echo "upnet - upstream network"
