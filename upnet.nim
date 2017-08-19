@@ -35,7 +35,7 @@ type
   Hosts = seq[Host]
 
   # UpstreamProxy = ref object of RootObj 
-  UpstreamProxy = object of RootObj
+  UpstreamProxy = ref object of RootObj
     master : bool
     gateways* : Hosts
     listenPort*: Port #= Port(7777)
@@ -83,7 +83,8 @@ proc pump(upProxy: UpstreamProxy, src, dst: AsyncSocket) {.async.} =
     var buffer: string
     try:
       ## Peek, so input buffer remains the same!
-      buffer = await src.recv(SIZE, timeout=2,flags={SocketFlag.Peek, SocketFlag.SafeDisconn})
+      # buffer = await src.recv(SIZE, timeout=2,flags={SocketFlag.Peek, SocketFlag.SafeDisconn})
+      buffer = await src.recv(SIZE, flags={SocketFlag.Peek, SocketFlag.SafeDisconn})
     except:
       buffer = ""
 
@@ -120,7 +121,10 @@ proc handleProxyClients(upProxy: UpstreamProxy, client: AsyncSocket) {.async.} =
 
     try:
       upstreamSocket = newAsyncSocket(buffered=true)
-      await upstreamSocket.connect(actualGateway.host, actualGateway.port)
+      let inTime = await withTimeout(upstreamSocket.connect(actualGateway.host, actualGateway.port), 1000)
+      if not inTIme :
+        echo "Gateway timeouted:", actualGateway
+        continue
       connected = true
       echo "Set lastWorking to: ", actualGateway 
       lastWorking = actualGateway # TODO
@@ -141,6 +145,7 @@ proc handleProxyClients(upProxy: UpstreamProxy, client: AsyncSocket) {.async.} =
 
 proc serveUpstreamProxy(upProxy: UpstreamProxy) {.async.} = 
   var server = newAsyncSocket()
+  server.setSockOpt(OptReuseAddr, true)
   server.bindAddr(upProxy.listenPort)
   server.listen()
   echo "Bound to upProxy.listenPort: ", upProxy.listenPort
@@ -153,59 +158,69 @@ proc serveUpstreamProxy(upProxy: UpstreamProxy) {.async.} =
     echo "Client connected"
     asyncCheck upProxy.handleProxyClients(client)
 
-
-proc writeHelp() = 
-  echo "upnet - upstream network"
-  echo " tunnels all TCP connections"
-  echo " established to the listen port"
-  echo " to every gateway specified"
-  echo ""
-  echo "Usage:"
-  echo " -g:host    gateway hostname, allowed multiple times!"
-  echo " -l:port    listening port"
-  echo " -x:key     XORs the payload with key"
-  echo "            (only entry and exit node needs key)"
-  echo ""
-  echo "Example:"
-  echo " # listens on port 1337 and tunnel TCP"
-  echo " # back and forth service.myhost.loc:8080"
-  echo " upnet -l:1337 -g:service.myhost.loc:8080"
-  echo " upnet -l:1337 -g:service.myhost.loc:8080 -g:192.168.2.155:8080"
-
-
 proc toHostPort(s: string): Host = 
   var parts = s.split(":")
   if parts.len == 2:    
     result.host = parts[0]
     result.port = Port(parseInt(parts[1]))
 
-# create proxy object with default configuration
-var upProxy = newUpstreamProxy( @[] ,Port(8877)) 
 
-# Parse command line options.
-for kind, key, val in getopt():
-  case kind
-    of cmdLongOption, cmdShortOption:
-      case key
-        of "help", "h": 
-          writeHelp()
-          quit()
-        of "g":
-          upProxy.gateways.add(val.toHostPort())
-        of "l":
-          var portnum = 0
-          discard parseInt(val, portnum)
-          upProxy.listenPort = Port( portnum )   
-        of "x":
-          upProxy.xorKey = val
-    else: 
-      discard
 
-if upProxy.gateways.len == 0:
-  writeHelp()
-  quit()
 
-# echo upProxy
-# echo @[upProxy.lastWorking] & upProxy.gateways
-asyncCheck upProxy.serveUpstreamProxy()
-runForever()
+when isMainModule:
+  # proc foo(upProxy: UpstreamProxy): Future[void] {.async.} =
+  #   for idx in 1..100:
+  #     var host = toHostPort("jugene.code0.xyz:" & $(200+idx) )
+  #     echo host
+  #     upProxy.gateways.add( host )
+  #     # await sleepAsync 100
+
+  proc writeHelp() = 
+    echo "upnet - upstream network"
+    echo " tunnels all TCP connections"
+    echo " established to the listen port"
+    echo " to every gateway specified"
+    echo ""
+    echo "Usage:"
+    echo " -g:host    gateway hostname, allowed multiple times!"
+    echo " -l:port    listening port"
+    echo " -x:key     XORs the payload with key"
+    echo "            (only entry and exit node needs key)"
+    echo ""
+    echo "Example:"
+    echo " # listens on port 1337 and tunnel TCP"
+    echo " # back and forth service.myhost.loc:8080"
+    echo " upnet -l:1337 -g:service.myhost.loc:8080"
+    echo " upnet -l:1337 -g:service.myhost.loc:8080 -g:192.168.2.155:8080"
+
+  # create proxy object with default configuration
+  var upProxy = newUpstreamProxy( @[] ,Port(8877)) 
+
+  # Parse command line options.
+  for kind, key, val in getopt():
+    case kind
+      of cmdLongOption, cmdShortOption:
+        case key
+          of "help", "h": 
+            writeHelp()
+            quit()
+          of "g":
+            upProxy.gateways.add(val.toHostPort())
+          of "l":
+            var portnum = 0
+            discard parseInt(val, portnum)
+            upProxy.listenPort = Port( portnum )   
+          of "x":
+            upProxy.xorKey = val
+      else: 
+        discard
+
+  if upProxy.gateways.len == 0:
+    writeHelp()
+    quit()
+
+  # echo upProxy
+  # echo @[upProxy.lastWorking] & upProxy.gateways
+  asyncCheck upProxy.serveUpstreamProxy()
+  asyncCheck upProxy.foo()
+  runForever()
