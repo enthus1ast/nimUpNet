@@ -44,7 +44,7 @@ type
     lastWorking*: Host # we save the last working host to fasten internet browsers.
 
 
-var lastWorking: Host ## TODO this should be the last working of the upnet object!!!
+# var lastWorking: Host ## TODO this should be the last working of the upnet object!!!
 
 
 proc xorPayload(upProxy: UpstreamProxy, buffer: string): string = 
@@ -107,8 +107,9 @@ proc pump(upProxy: UpstreamProxy, src, dst: AsyncSocket) {.async.} =
     else:
       await dst.send(upProxy.xorPayload(buffer))
 
-proc connectToFastest(gateways: Hosts, timeout = 3_000): Future[AsyncSocket] {.async.} = 
-  var futures = newSeq[ Future[AsyncSocket] ]()
+proc connectToFastest(upProxy: UpstreamProxy, gateways: Hosts, timeout = 3_000): Future[AsyncSocket] {.async.} = 
+  type SockHost = tuple[fut: Future[AsyncSocket], host: Host ]
+  var futures = newSeq[SockHost]()
   for actualGateway in gateways:
     echo "requesting: ", actualGateway
     if actualGateway.host.isNil or actualGateway.port.int == 0:
@@ -116,8 +117,7 @@ proc connectToFastest(gateways: Hosts, timeout = 3_000): Future[AsyncSocket] {.a
       continue # we skip invalid gateway entries
 
     try:
-      var fut = asyncnet.dial(actualGateway.host, actualGateway.port, IPPROTO_TCP)
-      # asyncCheck fut 
+      var fut = (asyncnet.dial(actualGateway.host, actualGateway.port, IPPROTO_TCP), actualGateway) 
       futures.add fut
     except:
       echo "dial fails"
@@ -129,13 +129,22 @@ proc connectToFastest(gateways: Hosts, timeout = 3_000): Future[AsyncSocket] {.a
 
   var timeoutFut = sleepAsync(timeout)
   while true:
-    for fut in futures:
-      echo fut.finished
-      if fut.finished == true:
-        return await fut
+    for sockHost in futures:
+      echo sockHost.host, ": ", sockHost.fut.finished
+      if sockHost.fut.finished == true and sockHost.fut.failed == false: 
+        upProxy.lastWorking = sockHost.host
+        return await sockHost.fut
       if timeoutFut.finished == true:
         echo "timeouted"
-        return 
+        raise 
+
+    # Check if all are finished
+    for sockHost in futures:
+      if not sockHost.fut.finished: continue
+      echo "all have finished"
+      raise # all have finished
+
+
     await sleepAsync(150)
       # quit()
     # try:
@@ -161,13 +170,25 @@ proc handleProxyClients(upProxy: UpstreamProxy, client: AsyncSocket) {.async.} =
   var connected: bool = false
   # for actualGateway in @[upProxy.lastWorking] & upProxy.gateways:
   # for actualGateway in upProxy.gateways:  
-  
 
-  try:
-    upstreamSocket = await connectToFastest(@[lastWorking] & upProxy.gateways)
-    connected = true
-  except:
-    connected = false
+
+  # First connect to the last working proxy  
+  if not upProxy.lastWorking.host.isNil:
+    try:
+      echo "Connect to lastWorking:", upProxy.lastWorking
+      upstreamSocket = await upProxy.connectToFastest(@[upProxy.lastWorking], 1_000)
+      connected = true
+    except:
+      connected = false
+
+
+  if connected == false:
+    # If it fails to answer, we connect to the fastest
+    try:
+      upstreamSocket = await upProxy.connectToFastest(@[upProxy.lastWorking] & upProxy.gateways, 20_000)
+      connected = true
+    except:
+      connected = false
       
   # lastWorking = upstreamSocket
   # let inTime = await withTimeout( connectToFastest(@[lastWorking] & upProxy.gateways) , 3000)
@@ -240,7 +261,7 @@ proc toHostPort(s: string): Host =
 
 when isMainModule:
   proc foo(upProxy: UpstreamProxy): Future[void] {.async.} =
-    for idx in 1..20:
+    for idx in 1..200:
       var host = toHostPort("jugene.code0.xyz:" & $(210+idx) )
       echo host
       upProxy.gateways.add( host )
