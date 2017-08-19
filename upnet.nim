@@ -31,21 +31,19 @@ const SIZE = 1024 ## max size the buffer could be
                   ## anyway...
 
 type 
-  Host = tuple[host: string,port: Port]
-  Hosts = seq[Host]
-
+  Host* = tuple[host: string,port: Port]
+  Hosts* = seq[Host]
+  ProxyModes* = enum
+    ModeSync, ModeAsync
   # UpstreamProxy = ref object of RootObj 
-  UpstreamProxy = ref object of RootObj
+  UpstreamProxy* = ref object of RootObj
     master : bool
     gateways* : Hosts
     listenPort*: Port #= Port(7777)
     running*: bool # = true
     xorKey*: string # every bit gets XORed with every char in this string (and its position)
     lastWorking*: Host # we save the last working host to fasten internet browsers.
-
-
-# var lastWorking: Host ## TODO this should be the last working of the upnet object!!!
-
+    mode*: ProxyModes
 
 proc xorPayload(upProxy: UpstreamProxy, buffer: string): string = 
   ## xors the buffer with the xorKey given in the upstreamProxy object
@@ -64,11 +62,11 @@ proc xorPayload(upProxy: UpstreamProxy, buffer: string): string =
       cbuf = chr( ((keyChar.int + i) mod 255) xor cbuf.int)
     result.add(cbuf)
 
-
-proc newUpstreamProxy(gateways: Hosts, listenPort: Port): UpstreamProxy =
+proc newUpstreamProxy*(gateways: Hosts, listenPort: Port, mode: ProxyModes = ModeAsync): UpstreamProxy =
   result = UpstreamProxy()
   result.listenPort = listenPort
   result.gateways = gateways
+  result.mode = mode
 
 proc isMaster(upProxy: UpstreamProxy): bool = 
   return upProxy.master
@@ -107,7 +105,38 @@ proc pump(upProxy: UpstreamProxy, src, dst: AsyncSocket) {.async.} =
     else:
       await dst.send(upProxy.xorPayload(buffer))
 
+proc connectInOrder(upProxy: UpstreamProxy, gateways: Hosts, timeout = 3_000): Future[AsyncSocket] {.async.} = 
+  ## tries to connect to all gateways one after another and in order.
+  var upstreamSocket: AsyncSocket
+  var connected: bool = false
+  let gwList = (if upProxy.lastWorking.host.isNil(): upProxy.gateways else: @[upProxy.lastWorking] & upProxy.gateways)
+  for actualGateway in gwList:
+    if actualGateway.host.isNil or actualGateway.port.int == 0:
+      echo "Gateway is invalid: ", actualGateway
+      continue # we skip invalid gateway entries
+
+    try:
+      upstreamSocket = newAsyncSocket(buffered=true)
+      var fut = upstreamSocket.connect(actualGateway.host, actualGateway.port)
+      let inTime = await withTimeout(fut, timeout)
+      if not inTIme :
+        echo "Gateway timeouted:", actualGateway
+        continue
+      await fut 
+      if fut.failed and fut.finished:
+        continue
+      connected = true
+      echo "Set lastWorking to: ", actualGateway 
+      upProxy.lastWorking = actualGateway # TODO
+      result = upstreamSocket
+      break
+    except:
+      echo "Could not connect to gateway ", actualGateway.host, ":", actualGateway.port 
+      raise
+
 proc connectToFastest(upProxy: UpstreamProxy, gateways: Hosts, timeout = 3_000): Future[AsyncSocket] {.async.} = 
+  ## this tries to connect to all gateways simultaniously and 
+  ## returns the AsyncSocket to the server which answers as fastest
   type SockHost = tuple[fut: Future[AsyncSocket], host: Host ]
   var futures = newSeq[SockHost]()
   for actualGateway in gateways:
@@ -115,7 +144,6 @@ proc connectToFastest(upProxy: UpstreamProxy, gateways: Hosts, timeout = 3_000):
     if actualGateway.host.isNil or actualGateway.port.int == 0:
       echo "Gateway is invalid (SKIPPING): ", actualGateway
       continue # we skip invalid gateway entries
-
     try:
       var fut = (asyncnet.dial(actualGateway.host, actualGateway.port, IPPROTO_TCP), actualGateway) 
       futures.add fut
@@ -125,7 +153,7 @@ proc connectToFastest(upProxy: UpstreamProxy, gateways: Hosts, timeout = 3_000):
 
   if futures.len == 0: 
     echo "no futures left"
-    return
+    raise
 
   var timeoutFut = sleepAsync(timeout)
   while true:
@@ -143,90 +171,36 @@ proc connectToFastest(upProxy: UpstreamProxy, gateways: Hosts, timeout = 3_000):
       if not sockHost.fut.finished: continue
       echo "all have finished"
       raise # all have finished
-
-
     await sleepAsync(150)
-      # quit()
-    # try:
-    #   # var upstreamSocket = newAsyncSocket(buffered=true)
-    #   # var fut = upstreamSocket.connect(actualGateway.host, actualGateway.port)
-    #   # futures.add fut
-
-    # #   if not inTIme :
-    # #     echo "Gateway timeouted:", actualGateway
-    # #     continue
-    # #   connected = true
-    # #   echo "Set lastWorking to: ", actualGateway 
-    # #   lastWorking = actualGateway # TODO
-    # #   break
-    # except:
-    #   echo getCurrentExceptionMsg()
-    # #   echo "Could not connect to gateway ", actualGateway.host, ":", actualGateway.port 
-    # # # upProxy.lastWorking = actualGateway    
-
 
 proc handleProxyClients(upProxy: UpstreamProxy, client: AsyncSocket) {.async.} = 
   var upstreamSocket: AsyncSocket
   var connected: bool = false
-  # for actualGateway in @[upProxy.lastWorking] & upProxy.gateways:
-  # for actualGateway in upProxy.gateways:  
-
-
+ 
   # First connect to the last working proxy  
   if not upProxy.lastWorking.host.isNil:
     try:
       echo "Connect to lastWorking:", upProxy.lastWorking
-      upstreamSocket = await upProxy.connectToFastest(@[upProxy.lastWorking], 1_000)
+      upstreamSocket = await upProxy.connectInOrder(@[upProxy.lastWorking], 1_000)
       connected = true
     except:
       connected = false
 
-
+  # The try the others
   if connected == false:
     # If it fails to answer, we connect to the fastest
     try:
-      upstreamSocket = await upProxy.connectToFastest(@[upProxy.lastWorking] & upProxy.gateways, 20_000)
+      var fut: Future[AsyncSocket]
+      case upProxy.mode
+      of ModeAsync:
+        fut = upProxy.connectToFastest(@[upProxy.lastWorking] & upProxy.gateways, 1_000)
+      of ModeSync:
+        fut = upProxy.connectInOrder(@[upProxy.lastWorking] & upProxy.gateways, 1_000)
+      upstreamSocket = await fut
       connected = true
     except:
       connected = false
       
-  # lastWorking = upstreamSocket
-  # let inTime = await withTimeout( connectToFastest(@[lastWorking] & upProxy.gateways) , 3000)
-
-  #     connected = true
-  #     echo "Set lastWorking to: ", actualGateway 
-  #     lastWorking = actualGateway # TODO
-  #     break
-  #   except:
-  #     # echo getCurrentExceptionMsg()
-  #     echo "Could not connect to gateway ", actualGateway.host, ":", actualGateway.port 
-  #   # upProxy.lastWorking = actualGateway
-
-
-
-  
-  # for actualGateway in @[lastWorking] & upProxy.gateways: # TODO
-  #   echo "trying ", actualGateway
-  #   if actualGateway.host.isNil or actualGateway.port.int == 0:
-  #     echo "Gateway is invalid: ", actualGateway
-  #     continue # we skip invalid gateway entries
-
-  #   try:
-  #     upstreamSocket = newAsyncSocket(buffered=true)
-  #     let inTime = await withTimeout(upstreamSocket.connect(actualGateway.host, actualGateway.port), 1000)
-  #     if not inTIme :
-  #       echo "Gateway timeouted:", actualGateway
-  #       continue
-  #     connected = true
-  #     echo "Set lastWorking to: ", actualGateway 
-  #     lastWorking = actualGateway # TODO
-  #     break
-  #   except:
-  #     # echo getCurrentExceptionMsg()
-  #     echo "Could not connect to gateway ", actualGateway.host, ":", actualGateway.port 
-  #   # upProxy.lastWorking = actualGateway
-
-
   if connected == true:
     asyncCheck upProxy.pump(client, upstreamSocket)
     asyncCheck upProxy.pump(upstreamSocket,client )
@@ -235,7 +209,7 @@ proc handleProxyClients(upProxy: UpstreamProxy, client: AsyncSocket) {.async.} =
     client.close()
     return
 
-proc serveUpstreamProxy(upProxy: UpstreamProxy) {.async.} = 
+proc serveUpstreamProxy*(upProxy: UpstreamProxy) {.async.} = 
   var server = newAsyncSocket()
   server.setSockOpt(OptReuseAddr, true)
   server.bindAddr(upProxy.listenPort)
@@ -256,16 +230,13 @@ proc toHostPort(s: string): Host =
     result.host = parts[0]
     result.port = Port(parseInt(parts[1]))
 
-
-
-
 when isMainModule:
-  proc foo(upProxy: UpstreamProxy): Future[void] {.async.} =
-    for idx in 1..200:
-      var host = toHostPort("jugene.code0.xyz:" & $(210+idx) )
-      echo host
-      upProxy.gateways.add( host )
-      # await sleepAsync 100
+  # proc foo(upProxy: UpstreamProxy): Future[void] {.async.} =
+  #   for idx in 1..200:
+  #     var host = toHostPort("jugene.code0.xyz:" & $(210+idx) )
+  #     # echo host
+  #     upProxy.gateways.add( host )
+  #     # await sleepAsync 100
 
   proc writeHelp() = 
     echo "upnet - upstream network"
@@ -277,13 +248,19 @@ when isMainModule:
     echo " -g:host    gateway hostname, allowed multiple times!"
     echo " -l:port    listening port"
     echo " -x:key     XORs the payload with key"
-    echo "            (only entry and exit node needs key)"
+    echo "              (only entry and exit node needs key)"
+    echo " --sync     Queries the gateways in order, one after another"
+    echo " --async    [DEFAULT] Queries the gateways in parallel and use the fastest"
+    #echo " --nolock   Does not try the last working gateway first, always query all"
+    echo ""
     echo ""
     echo "Example:"
     echo " # listens on port 1337 and tunnel TCP"
     echo " # back and forth service.myhost.loc:8080"
     echo " upnet -l:1337 -g:service.myhost.loc:8080"
-    echo " upnet -l:1337 -g:service.myhost.loc:8080 -g:192.168.2.155:8080"
+    echo ""
+    echo " # Sync strictly try the gateways in order"
+    echo " upnet -l:1337 --sync -g:service.myhost.loc:8080 -g:192.168.2.155:8080"
 
   # create proxy object with default configuration
   var upProxy = newUpstreamProxy( @[] ,Port(8877)) 
@@ -304,6 +281,12 @@ when isMainModule:
             upProxy.listenPort = Port( portnum )   
           of "x":
             upProxy.xorKey = val
+          of "sync":
+            echo "set sync"
+            upProxy.mode = ModeSync
+          of "async":
+            echo "set async"
+            upProxy.mode = ModeAsync            
       else: 
         discard
 
@@ -311,8 +294,6 @@ when isMainModule:
     writeHelp()
     quit()
 
-  # echo upProxy
-  # echo @[upProxy.lastWorking] & upProxy.gateways
   asyncCheck upProxy.serveUpstreamProxy()
-  asyncCheck upProxy.foo()
+  # asyncCheck upProxy.foo()
   runForever()
