@@ -111,6 +111,8 @@ proc connectInOrder(upProxy: UpstreamProxy, gateways: Hosts, timeout = 3_000): F
   var connected: bool = false
   let gwList = (if upProxy.lastWorking.host.isNil(): upProxy.gateways else: @[upProxy.lastWorking] & upProxy.gateways)
   for actualGateway in gwList:
+    if actualGateway == upProxy.lastWorking:
+        continue
     if actualGateway.host.isNil or actualGateway.port.int == 0:
       echo "Gateway is invalid: ", actualGateway
       continue # we skip invalid gateway entries
